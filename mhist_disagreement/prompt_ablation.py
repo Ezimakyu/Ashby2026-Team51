@@ -1,4 +1,3 @@
-cat > /projects/bfqi/teams/team51/prompt_ablation.py << 'EOF'
 """Prompt ablation: compare zero-shot AUC of prompt sets on unanimous MHIST images.
 
 Usage (on Delta):
@@ -38,4 +37,3 @@ for name, pr in sets.items():
     else:
         scores = p_ssa(pr)
     print(f"{name:16s} AUC = {auc(y, scores):.3f}")
-EOF
