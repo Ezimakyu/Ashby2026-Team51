@@ -1,0 +1,14 @@
+[
+  {
+    "HP": "a histopathology image of a hyperplastic polyp of the colon",
+    "SSA": "a histopathology image of a sessile serrated adenoma of the colon"
+  },
+  {
+    "HP": "H&E image of a hyperplastic polyp with straight, narrow crypts and serration limited to the upper crypt",
+    "SSA": "H&E image of a sessile serrated lesion with dilated, boot-shaped, horizontally spreading crypt bases"
+  },
+  {
+    "HP": "benign hyperplastic colorectal polyp",
+    "SSA": "sessile serrated lesion, a precancerous colorectal polyp"
+  }
+]
