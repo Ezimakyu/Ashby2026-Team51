@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
-logs/
+**/logs/*
+!**/logs/.gitkeep
 *.out
 *.err
 

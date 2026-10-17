@@ -20,7 +20,11 @@
 # (open_clip_torch, conch/musk packages via pip install --user), and
 # `hf auth login` with an account approved for the gated model.
 set -euo pipefail
-mkdir -p logs
+# logs/ is committed (logs/.gitkeep): Slurm opens --output before this script runs.
+# Cap BLAS/OpenMP/torch threads at our allocation; by default they size
+# themselves to the whole node and oversubscribe the cores we were given.
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
+export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS MKL_NUM_THREADS=$OMP_NUM_THREADS
 
 IMAGES="$1"
 OUT="$(realpath -m "$2")"
