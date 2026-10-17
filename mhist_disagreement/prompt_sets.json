@@ -1,0 +1,69 @@
+
+{
+
+  "1_name_morph": {
+
+    "HP": "a histopathology image of a hyperplastic polyp of the colon, with serration limited to the upper crypts and narrow, straight crypt bases",
+
+    "SSA": "a histopathology image of a sessile serrated adenoma of the colon, with serration extending to the crypt base and dilated, boot-shaped crypts"
+
+  },
+
+  "2_name_only": {
+
+    "HP": "an H&E image of a hyperplastic polyp",
+
+    "SSA": "an H&E image of a sessile serrated adenoma"
+
+  },
+
+  "3_morph_only": {
+
+    "HP": "colonic mucosa with straight, evenly spaced crypts that are serrated only in the upper half, with narrow crypt bases",
+
+    "SSA": "colonic mucosa with crypts serrated down to the base, with dilated crypt bases spreading sideways into L-shaped or boot-shaped crypts"
+
+  },
+
+  "4_new_name_SSL": {
+
+    "HP": "an H&E image of a hyperplastic polyp of the colon",
+
+    "SSA": "an H&E image of a sessile serrated lesion of the colon"
+
+  },
+
+  "5_report_style": {
+
+    "HP": "Colon, polyp, biopsy: hyperplastic polyp.",
+
+    "SSA": "Colon, polyp, biopsy: sessile serrated adenoma."
+
+  },
+
+  "6_observed": {
+
+    "HP": [
+
+      "H&E image of colonic mucosa with regular, evenly spaced, non-branching crypts",
+
+      "H&E image of a colon polyp with uniform oval crypts arranged in an orderly pattern",
+
+      "H&E image of colonic mucosa with straight, parallel crypts of similar size"
+
+    ],
+
+    "SSA": [
+
+      "H&E image of colonic mucosa with irregular, elongated crypts that branch into L-shaped and inverted T-shaped forms",
+
+      "H&E image of a colon polyp with distorted crypts spreading horizontally into boot-shaped crypts",
+
+      "H&E image of colonic mucosa with disorganized crypts of variable shape and uneven staining"
+
+    ]
+
+  }
+
+}
+
