@@ -16,7 +16,11 @@
 # Everything after the annotations path is passed to probe.py; bare tag=path
 # arguments are treated as --embeddings. Results land in results/<tag>/.
 set -euo pipefail
-mkdir -p logs
+# logs/ is committed (logs/.gitkeep): Slurm opens --output before this script runs.
+# Cap BLAS/OpenMP/torch threads at our allocation; by default they size
+# themselves to the whole node and oversubscribe the cores we were given.
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
+export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS MKL_NUM_THREADS=$OMP_NUM_THREADS
 
 module load pytorch-conda/2.8   # numpy, pandas, scikit-learn, scipy, matplotlib, torch
 
