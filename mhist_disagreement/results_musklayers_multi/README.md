@@ -80,6 +80,8 @@ which gives disagreement AUROC 0.735 where the slide shows 0.740. Ranges are 95%
 | Exact / within-1 SSA vote count | 27.7% / 65.7% | 27.5% / 68.1% | **29.1% / 73.0%** |
 | Clear-SSA images (6–7 votes) put in the right group | 29% | 30% | **42%** |
 
+(The clear-SSA row rewards confident predictions. Soft labels keep predictions moderate on purpose; see the control below.)
+
 **Triage** (flag the most uncertain cases for a second read):
 
 | Flag | Deck model: caught / accuracy on rest | `stack_logreg+attn`: caught / accuracy on rest | Random: caught |
@@ -93,6 +95,44 @@ which gives disagreement AUROC 0.735 where the slide shows 0.740. Ranges are 95%
 
 The stacked model also beats a plain equal-weight average of the same heads
 (disagreement AUROC 0.819 vs 0.784), so the learned weights matter.
+
+## Control: vote fractions vs majority labels on the final model
+
+Same layers, heads, folds, stacking and evaluation, but every training step uses
+the majority label (0/1) instead of the vote fraction (`layer_stack.py --labels hard`).
+The hard version re-picks its own settings by CV on hard labels, including the
+attention heads' weight decay, so no vote information reaches it.
+
+| Metric | Final model, soft (votes/7) | Final model, hard (majority) |
+|---|---|---|
+| Label AUROC (HP vs SSA) | 0.942 [0.93, 0.96] | 0.941 [0.93, 0.95] |
+| Accuracy / balanced accuracy | 87.6% / 87.2% | 87.5% / 86.2% |
+| NLL vs vote fractions | **0.482** [0.47, 0.50] | 0.571 [0.55, 0.60] |
+| Disagreement AUROC (2–5 vs unanimous) | **0.819** [0.79, 0.85] | 0.729 [0.69, 0.77] |
+| Disagreement AUROC (3–4 vs unanimous) | **0.833** | 0.744 |
+| Disagreement Spearman | **0.465** | 0.333 |
+| Triage at 20%: contested caught / accuracy on rest | **37%** / 93.0% | 32% / 93.7% |
+| Clear-SSA images (6–7 votes) put in the right group | 42% | **58%** |
+
+The same holds for the logistic-only stack: label AUROC 0.922 for both, disagreement
+AUROC 0.774 (soft) vs 0.705 (hard), NLL 0.502 vs 0.579.
+
+**Reading:**
+- **Better features improve classification; vote fractions improve disagreement.**
+  Both versions classify equally well (0.942 vs 0.941). Only the soft version learns
+  where pathologists split: disagreement AUROC +0.09, with non-overlapping ranges, and NLL
+  with non-overlapping ranges too.
+- **Better features alone don't buy disagreement detection.** The hard final model's
+  disagreement AUROC (0.729) is no better than the deck's soft head on plain MUSK
+  features (0.735), despite much better classification.
+- **The hard model is more decisive.** It pushes predictions toward 0 or 1, so it
+  puts more clearly-SSA images in the "SSA-confident" group (58% vs 42%), and its
+  accuracy on unflagged cases is similar. Soft labels deliberately keep contested cases
+  near 0.5. That costs some decisiveness on clear cases, and it's what makes the
+  uncertainty track pathologist disagreement.
+
+Files: `stack_logreg_hard/`, `stack_logreg+attn_hard/` (same layout as the soft folders),
+`triage_soft_vs_hard/`, `agreement_soft_vs_hard.png`.
 
 ## Caveats
 
@@ -108,6 +148,8 @@ The stacked model also beats a plain equal-weight average of the same heads
 |---|---|
 | `stack_logreg+attn/` | **final model**: `metrics.csv` (stack, equal average, each head), `weights.csv`/`.png`, `bases.json` (each head's chosen hyperparameter), `vote_heatmap.png` (true vs predicted 0–7 votes), `conflict_heatmap.png`, `vote_heatmap_summary.csv`, `test_predictions.csv` (gitignored) |
 | `stack_logreg/` | the same for the 8 layer-vector heads only |
+| `stack_logreg+attn_hard/`, `stack_logreg_hard/` | the hard-label control versions (`--labels hard`) |
+| `triage_soft_vs_hard/`, `agreement_soft_vs_hard.png` | soft vs hard final model, side by side |
 | `triage_stacked/` | triage curve, headline numbers, `triage_summary.md` (plain-English sentences), with the deck model for reference |
 | `agreement_groups.png` / `.csv` | 3-group heatmap (0–1, 2–5, 6–7 SSA votes) for both stacks |
 | `agreement_groups_deck_reference.png` / `.csv` | the same for the deck model |
