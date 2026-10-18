@@ -13,3 +13,6 @@ embeddings/
 # Saved heads hold per-image train embeddings and votes; stain predictions are per image.
 **/models/
 **/stain_predictions.csv
+# demo.py record/replay cache: server answers and copies of MHIST tiles
+demo_cache*.json
+demo_cache*_images/
