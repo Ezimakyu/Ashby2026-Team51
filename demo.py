@@ -241,7 +241,7 @@ def concept_scores(img: Image.Image) -> dict:
     out = {}
     for name, pair in CONCEPTS.items():
         label, score = top(classify([img], SECOND_OPINION_MODEL, pair)[0])
-        out[name] = round(score if label == "present" else 1 - score, 3)
+        out[name] = round(score if label == "present" else 1 - score, 4)
     return out
 
 
@@ -310,7 +310,7 @@ def run_second_opinion(img):
         "_Research prototype on MHIST, not for diagnosis._" + ("" if uses_models() else " **Mock mode: numbers are fake.**"),
     ])
     gallery = [(_similar_image(name), f"{k}/7 SSA · {_vote_tag(k)} · sim {s:.2f}") for name, k, s in r["similar"]]
-    concepts = [[name, f"{v:.2f}"] for name, v in r["concepts"].items()]
+    concepts = [[name, f"{v:.3f}"] for name, v in r["concepts"].items()]
     return verdict, gallery, concepts, r, ""
 
 
@@ -377,7 +377,7 @@ def run_image_test(img, stain, blur_r, quality):
         base = preds[0][0]
         changed = sum(p[0] != base for p in preds[1:])
         flips += changed
-        rows.append([m] + [f"{lab} ({sc:.2f})" + (" ⚠" if lab != base else "")
+        rows.append([m] + [f"{lab} ({sc:.3f})" + (" ⚠" if lab != base else "")
                            for lab, sc in preds] + [f"{changed}/{len(preds) - 1}"])
 
     total = len(available_models()) * (len(names) - 1)
@@ -400,7 +400,7 @@ def run_language_test(img):
         base = preds[0][0]
         changed = sum(p[0] != base for p in preds[1:])
         unstable += changed > 0
-        rows.append([m] + [f"{lab} ({sc:.2f})" + (" ⚠" if lab != base else "")
+        rows.append([m] + [f"{lab} ({sc:.3f})" + (" ⚠" if lab != base else "")
                            for lab, sc in preds])
     verdict = ("✅ Wording-robust: every model gave the same answer for all phrasings."
                if unstable == 0 else
@@ -426,6 +426,8 @@ def build_ui():
                     go0 = gr.Button("Get second opinion", variant="primary")
                     concept_table = gr.Dataframe(headers=["Morphology cue (zero-shot)", "p(present)"],
                                                  interactive=False)
+                    gr.Markdown("_Zero-shot scores are a softmax of two prompt similarities, so they sit "
+                                "near 0.5: read them as relative cues._")
                 with gr.Column(scale=2):
                     verdict0 = gr.Markdown()
                     similar = gr.Gallery(label="Most similar training cases and their pathologist votes",
