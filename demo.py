@@ -9,27 +9,46 @@ Tabs:
     Image test      does each model's call change under stain shift, blur or JPEG?
     Language test   does it change when only the prompt wording changes?
 
-DEMO_MODE=mock (the default) fakes every model call, so the UI runs anywhere.
-DEMO_MODE=real calls the hosted servers. They only answer from inside Delta,
-so run it in an OnDemand Desktop session and open the localhost link there.
-Real mode reads:
+DEMO_MODE picks where model answers come from:
+    mock    (default) fake numbers, runs anywhere; for working on the UI
+    real    the hosted servers, which only answer from inside Delta
+    record  like real, and also saves every server answer to DEMO_CACHE
+    replay  answers only from DEMO_CACHE: no servers, works on a laptop after
+            the servers stop. Shows only what was recorded (same tiles, same
+            Image test slider values); anything else says "not recorded"
+
+Record on Delta without a browser (no gradio needed), with the slider defaults:
+    python demo.py --record tile1.png tile2.png ...
+then copy demo_cache.json and demo_cache_images/ next to demo.py on the laptop
+and run DEMO_MODE=replay python demo.py.
+
+Real and record mode read:
     ENDPOINT_<MODEL>, API_KEY_<MODEL>   per hosted model; Second opinion needs MUSK
     HEADS_PATH      heads.py output (default mhist_disagreement/models/musk_heads.joblib)
     MHIST_IMAGES    MHIST images folder, to show the similar training cases
-    LUMEN_API_KEY   optional, for the report line; LUMEN_MODEL picks the model
+Every mode reads LUMEN_API_KEY (optional, for the report line; LUMEN_MODEL picks
+the model) and DEMO_CACHE (default demo_cache.json next to this file).
+The cache and its images are MHIST-derived: they're gitignored, keep them local.
 MHIST's terms don't allow redistributing its images: never launch with
 share=True (that makes a public link).
 """
 
+import argparse
 import hashlib
+import json
 import os
+import shutil
 import sys
 from functools import lru_cache
 from pathlib import Path
 
-import gradio as gr
 import numpy as np
 from PIL import Image
+
+try:
+    import gradio as gr
+except ImportError:  # `--record` runs headless on Delta, where gradio may not be installed
+    gr = None
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "mhist_disagreement"))
@@ -79,14 +98,28 @@ CONCEPTS = {
     },
 }
 
+# Image test slider defaults; `--record` records these values.
+STAIN, BLUR, QUALITY = 0.2, 1.5, 30
+
 MODELS = ["CONCH", "MUSK", "QUILTNET", "PLIP"]
 SECOND_OPINION_MODEL = "MUSK"
 MODE = os.environ.get("DEMO_MODE", "mock").lower()
 HEADS_PATH = os.environ.get("HEADS_PATH", str(HERE / "mhist_disagreement" / "models" / "musk_heads.joblib"))
 MHIST_IMAGES = os.environ.get("MHIST_IMAGES", "")
+CACHE_PATH = Path(os.environ.get("DEMO_CACHE", str(HERE / "demo_cache.json")))
+CACHE_IMAGES = CACHE_PATH.with_name(CACHE_PATH.stem + "_images")
 LUMEN_BASE = os.environ.get("LUMEN_BASE_URL", "https://lumen.ncsa.illinois.edu/v1")
 LUMEN_MODEL = os.environ.get("LUMEN_MODEL", "ornith-1.0-35b")  # cheapest Lumen model as of Oct 16
 N_SIMILAR = 5
+
+
+def fail(msg: str):
+    raise (gr.Error if gr else RuntimeError)(msg)
+
+
+def uses_models() -> bool:
+    """True when answers come from real models (live or recorded), not mock."""
+    return MODE in ("real", "record", "replay")
 
 
 def _rng_for(img: Image.Image, *salt: str):
@@ -103,17 +136,50 @@ def _mock_scores(img: Image.Image, model: str, prompts: dict) -> dict:
     return dict(zip(prompts.keys(), p.round(3).tolist()))
 
 
+# ---------- record / replay cache ----------
+# One entry per (route, model, image, prompts). Images are keyed by their pixels;
+# Image test variants are keyed by the original's pixels plus the slider values,
+# so replay doesn't depend on bit-exact perturbation output across machines.
+
+@lru_cache(maxsize=1)
+def _cache() -> dict:
+    return json.loads(CACHE_PATH.read_text()) if CACHE_PATH.exists() else {}
+
+
+def _save_cache():
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CACHE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_cache()))
+    tmp.replace(CACHE_PATH)
+
+
+def image_key(img: Image.Image) -> str:
+    img = img.convert("RGB")
+    return hashlib.sha1(f"{img.size}".encode() + img.tobytes()).hexdigest()
+
+
+def _entry_key(route, model, key, prompts=None) -> str:
+    return "|".join([route, model, key, json.dumps(prompts, sort_keys=True) if prompts else ""])
+
+
+def cached_models() -> list:
+    found = {k.split("|")[1] for k in _cache()}
+    return [m for m in MODELS if m in found]
+
+
 def available_models() -> list:
-    if MODE != "real":
-        return MODELS
-    return [m for m in MODELS if os.environ.get(f"ENDPOINT_{m}")]
+    if MODE == "replay":
+        return cached_models()
+    if MODE in ("real", "record"):
+        return [m for m in MODELS if os.environ.get(f"ENDPOINT_{m}")]
+    return MODELS
 
 
 def _server(model: str):
     """hosted.post() takes an object with endpoint, api_key and timeout."""
     endpoint = os.environ.get(f"ENDPOINT_{model}")
     if not endpoint:
-        raise gr.Error(f"Set ENDPOINT_{model} and API_KEY_{model} for real mode.")
+        fail(f"Set ENDPOINT_{model} and API_KEY_{model} for {MODE} mode.")
     return type("Server", (), {"endpoint": endpoint.rstrip("/"),
                                "api_key": os.environ.get(f"API_KEY_{model}", ""), "timeout": 120})
 
@@ -122,15 +188,36 @@ def _post(model: str, route: str, payload: dict) -> dict:
     try:
         return hosted.post(_server(model), route, payload)
     except SystemExit as e:  # hosted.post exits on a bad key; show it instead of stopping the app
-        raise gr.Error(str(e))
+        fail(str(e))
 
 
-def classify(images: list, model: str, prompts: dict) -> list:
-    if MODE != "real":
+def _call(route: str, model: str, images: list, prompts=None, keys=None) -> list:
+    """One server answer per image: from the cache in replay mode, from the server
+    otherwise (and saved to the cache in record mode)."""
+    keys = keys or [image_key(im) for im in images]
+    entries = [_entry_key(route, model, k, prompts) for k in keys]
+    if MODE == "replay":
+        missing = [e for e in entries if e not in _cache()]
+        if missing:
+            fail(f"Not recorded: {model} {route} for {len(missing)} image(s). Replay only shows tiles "
+                 "(and Image test slider values) that were recorded.")
+        return [_cache()[e] for e in entries]
+    payload = {"images": [hosted.encode_pil(im) for im in images]}
+    if prompts:
+        payload["prompts"] = prompts
+    result = _post(model, route, payload)
+    answers = result["embeddings"] if route == "embed" else result["results"]
+    if MODE == "record":
+        _cache().update(zip(entries, answers))
+        _save_cache()
+    return answers
+
+
+def classify(images: list, model: str, prompts: dict, keys=None) -> list:
+    if not uses_models():
         return [_mock_scores(im, model, prompts) for im in images]
-    result = _post(model, "classify", {"images": [hosted.encode_pil(im) for im in images], "prompts": prompts})
     # serve.py returns only the top label: {"results": [{"predicted_label", "score"}]}
-    return [{res["predicted_label"]: res["score"]} for res in result["results"]]
+    return [{res["predicted_label"]: res["score"]} for res in _call("classify", model, images, prompts, keys)]
 
 
 def top(scores: dict):
@@ -143,8 +230,7 @@ def top(scores: dict):
 @lru_cache(maxsize=1)
 def load_heads():
     if not Path(HEADS_PATH).exists():
-        raise gr.Error(f"No heads file at {HEADS_PATH}. Build it with mhist_disagreement/heads.py, "
-                       "or set HEADS_PATH.")
+        fail(f"No heads file at {HEADS_PATH}. Build it with mhist_disagreement/heads.py, or set HEADS_PATH.")
     import joblib
     return joblib.load(HEADS_PATH)
 
@@ -155,7 +241,7 @@ def concept_scores(img: Image.Image) -> dict:
     out = {}
     for name, pair in CONCEPTS.items():
         label, score = top(classify([img], SECOND_OPINION_MODEL, pair)[0])
-        out[name] = round(score if label == "present" else 1 - score, 3)
+        out[name] = round(score if label == "present" else 1 - score, 4)
     return out
 
 
@@ -166,8 +252,16 @@ def _vote_tag(k: int) -> str:
 
 
 def _similar_image(name: str) -> Image.Image:
-    path = Path(MHIST_IMAGES) / name
-    return Image.open(path).convert("RGB") if MHIST_IMAGES and path.exists() else Image.new("RGB", (224, 224), "#d9d9d9")
+    """From MHIST_IMAGES, else the cache's image folder. Record mode copies each
+    shown tile into that folder, so replay can show it without the dataset."""
+    for folder in (MHIST_IMAGES, CACHE_IMAGES):
+        path = Path(folder) / name if folder else None
+        if path and path.exists():
+            if MODE == "record" and Path(folder) != CACHE_IMAGES:
+                CACHE_IMAGES.mkdir(exist_ok=True)
+                shutil.copy2(path, CACHE_IMAGES / name)
+            return Image.open(path).convert("RGB")
+    return Image.new("RGB", (224, 224), "#d9d9d9")
 
 
 def _mock_opinion(img: Image.Image) -> dict:
@@ -180,11 +274,10 @@ def _mock_opinion(img: Image.Image) -> dict:
     }
 
 
-def _real_opinion(img: Image.Image) -> dict:
+def _model_opinion(img: Image.Image) -> dict:
     import heads as heads_mod
     heads = load_heads()
-    emb = np.asarray(_post(SECOND_OPINION_MODEL, "embed", {"images": [hosted.encode_pil(img)]})["embeddings"][0],
-                     dtype=np.float32)
+    emb = np.asarray(_call("embed", SECOND_OPINION_MODEL, [img])[0], dtype=np.float32)
     pred = heads_mod.predict(heads, emb)
     idx, sims = heads_mod.neighbours(heads, emb, N_SIMILAR)
     return {
@@ -196,9 +289,9 @@ def _real_opinion(img: Image.Image) -> dict:
 
 def run_second_opinion(img):
     if img is None:
-        raise gr.Error("Upload an H&E tile first.")
+        fail("Upload an H&E tile first.")
     img = img.convert("RGB")
-    r = _real_opinion(img) if MODE == "real" else _mock_opinion(img)
+    r = _model_opinion(img) if uses_models() else _mock_opinion(img)
     r["flag"] = r["conflict"] >= r["threshold"]
     r["concepts"] = concept_scores(img)
     p = r["p_ssa"]
@@ -214,10 +307,10 @@ def run_second_opinion(img):
         flag,
         f"**Similar training cases:** {n_contested} of {len(r['similar'])} were contested "
         "(2–5 of 7 pathologists voted SSA).",
-        "_Research prototype on MHIST, not for diagnosis._" + (" **Mock mode: numbers are fake.**" if MODE != "real" else ""),
+        "_Research prototype on MHIST, not for diagnosis._" + ("" if uses_models() else " **Mock mode: numbers are fake.**"),
     ])
     gallery = [(_similar_image(name), f"{k}/7 SSA · {_vote_tag(k)} · sim {s:.2f}") for name, k, s in r["similar"]]
-    concepts = [[name, f"{v:.2f}"] for name, v in r["concepts"].items()]
+    concepts = [[name, f"{v:.3f}"] for name, v in r["concepts"].items()]
     return verdict, gallery, concepts, r, ""
 
 
@@ -229,7 +322,7 @@ def _template_line(r: dict) -> str:
 
 def run_lumen_summary(r):
     if not r:
-        raise gr.Error("Run the second opinion first.")
+        fail("Run the second opinion first.")
     key = os.environ.get("LUMEN_API_KEY")
     if not key:
         return _template_line(r) + "\n\n_(template; set LUMEN_API_KEY for an LLM-written line)_"
@@ -264,7 +357,7 @@ def run_lumen_summary(r):
 
 def run_image_test(img, stain, blur_r, quality):
     if img is None:
-        raise gr.Error("Upload an H&E tile first.")
+        fail("Upload an H&E tile first.")
     img = img.convert("RGB")
     variants = {
         "Original": img,
@@ -274,15 +367,17 @@ def run_image_test(img, stain, blur_r, quality):
         "All three": jpeg(blur(stain_shift(img, stain), blur_r), quality),
     }
     names, ims = list(variants), list(variants.values())
+    base_key = image_key(img)
+    keys = [base_key] + [f"{base_key}|{n}|stain={stain}|blur={blur_r}|jpeg={quality}" for n in names[1:]]
     prompts = PROMPT_STYLES[DEFAULT_STYLE]
 
     rows, flips = [], 0
     for m in available_models():
-        preds = [top(s) for s in classify(ims, m, prompts)]
+        preds = [top(s) for s in classify(ims, m, prompts, keys)]
         base = preds[0][0]
         changed = sum(p[0] != base for p in preds[1:])
         flips += changed
-        rows.append([m] + [f"{lab} ({sc:.2f})" + (" ⚠" if lab != base else "")
+        rows.append([m] + [f"{lab} ({sc:.3f})" + (" ⚠" if lab != base else "")
                            for lab, sc in preds] + [f"{changed}/{len(preds) - 1}"])
 
     total = len(available_models()) * (len(names) - 1)
@@ -296,7 +391,7 @@ def run_image_test(img, stain, blur_r, quality):
 
 def run_language_test(img):
     if img is None:
-        raise gr.Error("Upload an H&E tile first.")
+        fail("Upload an H&E tile first.")
     img = img.convert("RGB")
     styles = list(PROMPT_STYLES)
     rows, unstable = [], 0
@@ -305,7 +400,7 @@ def run_language_test(img):
         base = preds[0][0]
         changed = sum(p[0] != base for p in preds[1:])
         unstable += changed > 0
-        rows.append([m] + [f"{lab} ({sc:.2f})" + (" ⚠" if lab != base else "")
+        rows.append([m] + [f"{lab} ({sc:.3f})" + (" ⚠" if lab != base else "")
                            for lab, sc in preds])
     verdict = ("✅ Wording-robust: every model gave the same answer for all phrasings."
                if unstable == 0 else
@@ -313,55 +408,84 @@ def run_language_test(img):
     return rows, verdict
 
 
-with gr.Blocks(title="Pathology Reliability Checker") as demo:
-    gr.Markdown(
-        "# Pathology Reliability Checker\n"
-        "Hyperplastic polyp vs sessile serrated lesion on MHIST: a second opinion that knows when "
-        "pathologists would disagree, and checks of whether models **see** and **read** like pathologists. "
-        f"Mode: **{MODE.upper()}** · Models: {', '.join(available_models()) or 'none configured'}"
-    )
-    with gr.Tab("Second opinion"):
-        opinion = gr.State()
-        with gr.Row():
-            with gr.Column(scale=1):
-                img_in0 = gr.Image(type="pil", label="H&E tile")
-                go0 = gr.Button("Get second opinion", variant="primary")
-                concept_table = gr.Dataframe(headers=["Morphology cue (zero-shot)", "p(present)"],
-                                             interactive=False)
-            with gr.Column(scale=2):
-                verdict0 = gr.Markdown()
-                similar = gr.Gallery(label="Most similar training cases and their pathologist votes",
-                                     columns=N_SIMILAR, height=240)
-                go_lumen = gr.Button("Draft report line (Lumen)")
-                report = gr.Markdown()
-        go0.click(run_second_opinion, [img_in0], [verdict0, similar, concept_table, opinion, report])
-        go_lumen.click(run_lumen_summary, [opinion], [report])
+# ---------- UI ----------
 
-    with gr.Tab("Image test"):
-        with gr.Row():
-            with gr.Column(scale=1):
-                img_in = gr.Image(type="pil", label="H&E tile")
-                stain = gr.Slider(0, 0.5, value=0.2, step=0.05, label="Stain shift strength")
-                blur_r = gr.Slider(0, 4, value=1.5, step=0.5, label="Blur radius (px)")
-                quality = gr.Slider(10, 100, value=30, step=5, label="JPEG quality")
-                go1 = gr.Button("Run image test", variant="primary")
-            with gr.Column(scale=2):
-                gallery = gr.Gallery(label="What each model sees", columns=5, height=220)
-                verdict1 = gr.Markdown()
-                table1 = gr.Dataframe(
-                    headers=["Model", "Original", "Stain shift", "Blur", "JPEG", "All three", "Changed"],
-                    interactive=False)
-        go1.click(run_image_test, [img_in, stain, blur_r, quality], [gallery, table1, verdict1])
+def build_ui():
+    with gr.Blocks(title="Pathology Reliability Checker") as demo:
+        gr.Markdown(
+            "# Pathology Reliability Checker\n"
+            "Hyperplastic polyp vs sessile serrated lesion on MHIST: a second opinion that knows when "
+            "pathologists would disagree, and checks of whether models **see** and **read** like pathologists. "
+            f"Mode: **{MODE.upper()}** · Models: {', '.join(available_models()) or 'none configured'}"
+        )
+        with gr.Tab("Second opinion"):
+            opinion = gr.State()
+            with gr.Row():
+                with gr.Column(scale=1):
+                    img_in0 = gr.Image(type="pil", label="H&E tile")
+                    go0 = gr.Button("Get second opinion", variant="primary")
+                    concept_table = gr.Dataframe(headers=["Morphology cue (zero-shot)", "p(present)"],
+                                                 interactive=False)
+                    gr.Markdown("_Zero-shot scores are a softmax of two prompt similarities, so they sit "
+                                "near 0.5: read them as relative cues._")
+                with gr.Column(scale=2):
+                    verdict0 = gr.Markdown()
+                    similar = gr.Gallery(label="Most similar training cases and their pathologist votes",
+                                         columns=N_SIMILAR, height=240)
+                    go_lumen = gr.Button("Draft report line (Lumen)")
+                    report = gr.Markdown()
+            go0.click(run_second_opinion, [img_in0], [verdict0, similar, concept_table, opinion, report])
+            go_lumen.click(run_lumen_summary, [opinion], [report])
 
-    with gr.Tab("Language test"):
-        with gr.Row():
-            with gr.Column(scale=1):
-                img_in2 = gr.Image(type="pil", label="H&E tile")
-                go2 = gr.Button("Run language test", variant="primary")
-            with gr.Column(scale=2):
-                verdict2 = gr.Markdown()
-                table2 = gr.Dataframe(headers=["Model"] + list(PROMPT_STYLES), interactive=False)
-        go2.click(run_language_test, [img_in2], [table2, verdict2])
+        with gr.Tab("Image test"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    img_in = gr.Image(type="pil", label="H&E tile")
+                    stain = gr.Slider(0, 0.5, value=STAIN, step=0.05, label="Stain shift strength")
+                    blur_r = gr.Slider(0, 4, value=BLUR, step=0.5, label="Blur radius (px)")
+                    quality = gr.Slider(10, 100, value=QUALITY, step=5, label="JPEG quality")
+                    go1 = gr.Button("Run image test", variant="primary")
+                with gr.Column(scale=2):
+                    gallery = gr.Gallery(label="What each model sees", columns=5, height=220)
+                    verdict1 = gr.Markdown()
+                    table1 = gr.Dataframe(
+                        headers=["Model", "Original", "Stain shift", "Blur", "JPEG", "All three", "Changed"],
+                        interactive=False)
+            go1.click(run_image_test, [img_in, stain, blur_r, quality], [gallery, table1, verdict1])
+
+        with gr.Tab("Language test"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    img_in2 = gr.Image(type="pil", label="H&E tile")
+                    go2 = gr.Button("Run language test", variant="primary")
+                with gr.Column(scale=2):
+                    verdict2 = gr.Markdown()
+                    table2 = gr.Dataframe(headers=["Model"] + list(PROMPT_STYLES), interactive=False)
+            go2.click(run_language_test, [img_in2], [table2, verdict2])
+    return demo
+
+
+def record(paths):
+    """Run every tab on each tile with the slider defaults, saving server answers to the cache."""
+    global MODE
+    MODE = "record"
+    print(f"recording {len(paths)} tile(s) with {', '.join(available_models()) or 'no models'} -> {CACHE_PATH}")
+    for path in paths:
+        img = Image.open(path).convert("RGB")
+        verdict, _, _, r, _ = run_second_opinion(img)
+        run_image_test(img, STAIN, BLUR, QUALITY)
+        run_language_test(img)
+        print(f"  {Path(path).name}: P(SSA) {r['p_ssa']:.2f}, flag {'yes' if r['flag'] else 'no'}", flush=True)
+    print(f"done: {len(_cache())} cached answers; similar-case tiles in {CACHE_IMAGES}/")
+
 
 if __name__ == "__main__":
-    demo.launch(share=False)  # never share=True: the demo shows MHIST images
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--record", nargs="+", metavar="TILE", help="record these tiles headlessly, then exit")
+    args = parser.parse_args()
+    if args.record:
+        record(args.record)
+    else:
+        if gr is None:
+            raise SystemExit("gradio isn't installed: pip install gradio (or use --record).")
+        build_ui().launch(share=False)  # never share=True: the demo shows MHIST images
