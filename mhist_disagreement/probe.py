@@ -11,13 +11,18 @@ Methods:
     zero_shot          p(SSA) from zero_shot.py (only if --zero-shot is given)
     logreg_hard        logistic regression on the majority label
     svm_hard           RBF SVM on the majority label, Platt-scaled probabilities
+    logreg_smooth_<e>  control: logistic regression on label-smoothed majority labels,
+                       y*(1-e) + e/2 for e in 0.1/0.2/0.3, same code path as logreg_soft.
+                       If it matches logreg_soft, the votes add nothing beyond regularization
     logreg_soft        logistic regression on the vote fraction k/7 (binomial likelihood)
     knn_soft           mean vote fraction of the k nearest training images (cosine)
+    mlp_hard           control: the same MLP trained on majority labels, dropout tuned 0.2-0.5
     mlp_soft           1-hidden-layer MLP, BCE on the vote fraction
     ridge_conflict     ridge regression straight onto conflict = min(k, 7-k)
 
 Hyperparameters are picked by 5-fold CV on the train split; the test split is
-used once, for the reported metrics.
+used once, for the reported metrics. The two controls are tuned against the
+majority labels only, so no vote information reaches them.
 
     python probe.py --annotations annotations.csv \
         --embeddings musk=embeddings/musk.csv \
@@ -80,8 +85,9 @@ class SoftLogReg:
 
 
 class SoftMLP:
-    def __init__(self, weight_decay, hidden=128, epochs=300, lr=1e-3, seed=0):
+    def __init__(self, weight_decay, hidden=128, epochs=300, lr=1e-3, seed=0, dropout=0.2):
         self.weight_decay, self.hidden, self.epochs, self.lr, self.seed = weight_decay, hidden, epochs, lr, seed
+        self.dropout = dropout
 
     def fit(self, X, p):
         import torch
@@ -90,7 +96,7 @@ class SoftMLP:
         Xt = torch.tensor(self.scaler.transform(X), dtype=torch.float32)
         pt = torch.tensor(p, dtype=torch.float32)
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(X.shape[1], self.hidden), torch.nn.ReLU(), torch.nn.Dropout(0.2),
+            torch.nn.Linear(X.shape[1], self.hidden), torch.nn.ReLU(), torch.nn.Dropout(self.dropout),
             torch.nn.Linear(self.hidden, 1),
         )
         opt = torch.optim.Adam(self.net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
@@ -111,18 +117,21 @@ class SoftMLP:
             return torch.sigmoid(self.net(Xt).squeeze(1)).numpy()
 
 
-def pick_by_cv(make, grid, X, p, seed):
-    """Return the grid value with the lowest mean held-out binomial NLL."""
+def pick_by_cv(make, grid, X, p, seed, score_target=None):
+    """Return the grid value with the lowest mean held-out binomial NLL.
+    Models are fit on targets `p` and scored against `score_target`
+    (default: `p` itself)."""
+    score_target = p if score_target is None else score_target
     folds = KFold(n_splits=5, shuffle=True, random_state=seed)
     scores = {}
     for value in grid:
         losses = []
         for tr, va in folds.split(X):
             model = make(value).fit(X[tr], p[tr])
-            losses.append(binomial_nll(p[va], model.predict(X[va])))
+            losses.append(binomial_nll(score_target[va], model.predict(X[va])))
         scores[value] = float(np.mean(losses))
     best = min(scores, key=scores.get)
-    return best, scores
+    return best, {str(k): v for k, v in scores.items()}
 
 
 # ---------- fitting all methods ----------
@@ -149,6 +158,17 @@ def fit_methods(train: pd.DataFrame, test: pd.DataFrame, seed: int):
     out["svm_hard"] = gs.predict_proba(Xte)[:, 1]
     chosen["svm_hard"] = gs.best_params_
 
+    # Control: same code path as logreg_soft, but targets are smoothed majority
+    # labels (no vote information); C is tuned against the hard labels.
+    smooth_cv = {}
+    for eps in (0.1, 0.2, 0.3):
+        ys = ytr * (1 - eps) + eps / 2
+        C, scores = pick_by_cv(SoftLogReg, [0.001, 0.01, 0.1, 1.0], Xtr, ys, seed, score_target=ytr)
+        out[f"logreg_smooth_{eps}"] = SoftLogReg(C).fit(Xtr, ys).predict(Xte)
+        chosen[f"logreg_smooth_{eps}"] = {"C": C, "cv_nll_vs_hard": scores}
+        smooth_cv[eps] = scores[str(C)]
+    chosen["logreg_smooth_cv_preferred_eps"] = min(smooth_cv, key=smooth_cv.get)
+
     C, scores = pick_by_cv(SoftLogReg, [0.001, 0.01, 0.1, 1.0], Xtr, ptr, seed)
     out["logreg_soft"] = SoftLogReg(C).fit(Xtr, ptr).predict(Xte)
     chosen["logreg_soft"] = {"C": C, "cv_nll": scores}
@@ -161,11 +181,18 @@ def fit_methods(train: pd.DataFrame, test: pd.DataFrame, seed: int):
     chosen["knn_soft"] = gs.best_params_
 
     try:
+        # Control: same MLP on majority labels, dropout and weight decay tuned against them.
+        grid = [(wd, dr) for wd in (1e-4, 1e-3, 1e-2) for dr in (0.2, 0.35, 0.5)]
+        (wd, dr), scores = pick_by_cv(lambda v: SoftMLP(v[0], seed=seed, dropout=v[1]), grid,
+                                      Xtr, ytr.astype(float), seed)
+        out["mlp_hard"] = SoftMLP(wd, seed=seed, dropout=dr).fit(Xtr, ytr.astype(float)).predict(Xte)
+        chosen["mlp_hard"] = {"weight_decay": wd, "dropout": dr, "cv_nll_vs_hard": scores}
+
         wd, scores = pick_by_cv(lambda v: SoftMLP(v, seed=seed), [1e-4, 1e-3, 1e-2], Xtr, ptr, seed)
         out["mlp_soft"] = SoftMLP(wd, seed=seed).fit(Xtr, ptr).predict(Xte)
         chosen["mlp_soft"] = {"weight_decay": wd, "cv_nll": scores}
     except ImportError:
-        print("warning: torch not importable, skipping mlp_soft")
+        print("warning: torch not importable, skipping mlp_hard and mlp_soft")
 
     ridge = make_pipeline(StandardScaler(), RidgeCV(alphas=np.logspace(-1, 4, 11)))
     ridge.fit(Xtr, ctr)
@@ -214,7 +241,7 @@ def point_metrics(test: pd.DataFrame, p, u) -> dict:
     return m
 
 
-BOOT_KEYS = ("label_auroc", "label_acc", "vote_spearman", "disagree_spearman", "disagree_auroc")
+BOOT_KEYS = ("label_auroc", "label_acc", "vote_spearman", "binomial_nll", "disagree_spearman", "disagree_auroc")
 
 
 def bootstrap_ci(test: pd.DataFrame, p, u, seed: int) -> dict:
@@ -242,7 +269,7 @@ def plot_votes(test, results, path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     names = [n for n, (p, _) in results.items() if p is not None and n != "baseline_constant"]
-    cols = min(3, len(names))
+    cols = min(4, len(names))
     rows = int(np.ceil(len(names) / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.4 * rows), squeeze=False)
     k = test["votes_ssa"].to_numpy()
@@ -261,20 +288,21 @@ def plot_votes(test, results, path):
     plt.close(fig)
 
 
-def plot_pca(df, path):
+def plot_pca(train, test, path):
+    """PC1/PC2 fit on train, test images plotted. pca_analysis.py goes further."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    X = StandardScaler().fit_transform(np.stack(df["embedding"]))
-    pca = PCA(n_components=2, random_state=0).fit(X)
-    Z = pca.transform(X)
+    scaler = StandardScaler().fit(np.stack(train["embedding"]))
+    pca = PCA(n_components=2, random_state=0).fit(scaler.transform(np.stack(train["embedding"])))
+    Z = pca.transform(scaler.transform(np.stack(test["embedding"])))
     fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    sc = ax.scatter(Z[:, 0], Z[:, 1], c=df["votes_ssa"], cmap="coolwarm", s=6, alpha=0.7, vmin=0, vmax=7)
+    sc = ax.scatter(Z[:, 0], Z[:, 1], c=test["votes_ssa"], cmap="coolwarm", s=6, alpha=0.7, vmin=0, vmax=7)
     fig.colorbar(sc, ax=ax, label="pathologists voting SSA (of 7)")
     ev = pca.explained_variance_ratio_
     ax.set_xlabel(f"PC1 ({ev[0]:.0%} var)")
     ax.set_ylabel(f"PC2 ({ev[1]:.0%} var)")
-    ax.set_title("Embeddings, all images")
+    ax.set_title("Test images, PCA fit on train")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
@@ -335,7 +363,7 @@ def run_one(tag, ann, emb_path, zs_path, out_dir: Path, seed: int) -> pd.DataFra
         preds[f"u_{name}"] = u
     preds.to_csv(out_dir / "test_predictions.csv", index=False)
     plot_votes(test, results, out_dir / "votes_boxplot.png")
-    plot_pca(df, out_dir / "pca.png")
+    plot_pca(train, test, out_dir / "pca.png")
     return table
 
 
@@ -365,7 +393,7 @@ def main(argv=None) -> int:
     summary.to_csv(Path(args.out) / "summary.csv", index=False)
 
     show = ["embeddings", "method", "label_auroc", "label_acc", "label_balanced_acc",
-            "vote_spearman", "disagree_spearman", "disagree_auroc", "disagree_auroc_3v4"]
+            "vote_spearman", "binomial_nll", "disagree_spearman", "disagree_auroc", "disagree_auroc_3v4"]
     with pd.option_context("display.width", 200, "display.max_columns", 20, "display.float_format", "{:.3f}".format):
         print("\n" + summary[[c for c in show if c in summary]].to_string(index=False))
     print(f"\nFull table with 95% bootstrap intervals: {Path(args.out) / 'summary.csv'}")
