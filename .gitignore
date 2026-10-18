@@ -9,3 +9,10 @@ logs/
 data/
 embeddings/
 **/test_predictions.csv
+.DS_Store
+
+# Secrets
+.env
+
+# Full-feature embeddings (derived from MHIST)
+embeddings_full/
