@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
-logs/
+**/logs/*
+!**/logs/.gitkeep
 *.out
 *.err
 
@@ -9,3 +10,6 @@ logs/
 data/
 embeddings/
 **/test_predictions.csv
+# Saved heads hold per-image train embeddings and votes; stain predictions are per image.
+**/models/
+**/stain_predictions.csv
