@@ -44,3 +44,15 @@ python to_csv.py --check-against ../embeddings_full/musk_ms.csv
 The check should print a cosine similarity of ~1.0. That confirms the
 extraction matches MUSK's own output. It then writes one CSV per layer and
 kind to `../embeddings_full/layers/`, ready for `probe.py`.
+
+## Attention head (laptop)
+
+```bash
+python attention_head.py --annotations ../data/annotations.csv \
+    --npz ../embeddings_full/musk_tokens_grids.npz --grid-layer 12 --variants attn_tokens
+```
+
+Writes `../results_musk_layers/attention_head_L<layer>/` (metrics, test predictions,
+hyperparameters) and per-image attention maps to `../embeddings_full/attention_maps_L<layer>.npz`.
+About 5 minutes per layer on a laptop CPU. `python ../overview.py` then rebuilds the
+all-methods comparison in `../results_compare/`.

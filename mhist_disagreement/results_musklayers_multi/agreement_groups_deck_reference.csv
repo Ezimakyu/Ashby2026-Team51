@@ -1,0 +1,4 @@
+model,head,true_group,n,pred_HP-confident,pred_contested,pred_SSA-confident
+deck_MUSK2048_soft,logreg_soft,HP-confident,394,0.6675126903553299,0.33248730964467005,0.0
+deck_MUSK2048_soft,logreg_soft,contested,350,0.12571428571428572,0.78,0.09428571428571429
+deck_MUSK2048_soft,logreg_soft,SSA-confident,233,0.004291845493562232,0.7081545064377682,0.2875536480686695

@@ -1,0 +1,7 @@
+model,head,true_group,n,pred_HP-confident,pred_contested,pred_SSA-confident
+stack_logreg,stack,HP-confident,394,0.682741116751269,0.31725888324873097,0.0
+stack_logreg,stack,contested,350,0.10857142857142857,0.8228571428571428,0.06857142857142857
+stack_logreg,stack,SSA-confident,233,0.0,0.6952789699570815,0.30472103004291845
+stack_logreg+attn,stack,HP-confident,394,0.6903553299492385,0.3096446700507614,0.0
+stack_logreg+attn,stack,contested,350,0.11142857142857143,0.8171428571428572,0.07142857142857142
+stack_logreg+attn,stack,SSA-confident,233,0.0,0.575107296137339,0.4248927038626609
