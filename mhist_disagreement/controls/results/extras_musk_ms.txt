@@ -1,0 +1,22 @@
+== musk_ms: test 977 images, 360 SSA majority ==
+head            labelAUC  SSA_sens  HP_spec  [TN FP / FN TP]   NLL [95% CI]          disAUC [95% CI]
+hard            0.899     0.750     0.874    [539 78 / 90 270]   0.613 [0.588-0.643]   0.694 [0.650-0.735]
+soft            0.901     0.794     0.844    [521 96 / 74 286]   0.518 [0.502-0.534]   0.740 [0.701-0.777]
+hard_balanced   0.900     0.856     0.806    [497 120 / 52 308]   0.610 [0.580-0.642]   0.717 [0.676-0.756]
+soft_balanced   0.900     0.925     0.695    [429 188 / 27 333]   0.544 [0.526-0.563]   0.726 [0.690-0.765]
+
+== Image quality (hypothesis 2), test images, soft head ==
+brightness       vs model_error           rho=+0.134  p=2.58e-05
+brightness       vs pathologist_conflict  rho=-0.003  p=0.915
+brightness       vs model_uncertainty     rho=+0.165  p=2.28e-07
+tissue_fraction  vs model_error           rho=-0.127  p=6.56e-05
+tissue_fraction  vs pathologist_conflict  rho=+0.023  p=0.472
+tissue_fraction  vs model_uncertainty     rho=-0.155  p=1.18e-06
+brightness mean 185.9 (sd 14.1); tissue fraction mean 0.64
+
+== Zero-shot, standard eval (disputed = 2-5 votes vs 0/7) ==
+file                                     labelAUC [95% CI]        disAUC [95% CI]       NLL
+zeroshot_conch_set1_test.csv             0.644 [0.611-0.679]   0.429 [0.384-0.473]   0.689
+zeroshot_musk_set1_test.csv              0.690 [0.659-0.723]   0.526 [0.482-0.570]   0.691
+zeroshot_plip_set1_test.csv              0.627 [0.596-0.661]   0.459 [0.414-0.501]   0.693
+zeroshot_quiltnet_set1_test.csv          0.559 [0.524-0.598]   0.599 [0.554-0.639]   0.691
