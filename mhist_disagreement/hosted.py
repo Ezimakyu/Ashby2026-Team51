@@ -6,6 +6,7 @@ PATHOLOGY_API_KEY env vars. Don't commit either.
 """
 
 import base64
+import io
 import os
 from pathlib import Path
 from typing import List
@@ -46,6 +47,13 @@ def find_images(folder: str) -> List[str]:
 
 def encode(path: str) -> str:
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+
+
+def encode_pil(img) -> str:
+    """Base64 PNG of an in-memory PIL image (e.g. a perturbed tile)."""
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def post(args, route: str, payload: dict) -> dict:
