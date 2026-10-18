@@ -11,10 +11,13 @@ Reports, per agreement group (7/7, 6/7, 5/7, 4/7 = size of the majority):
     flip_any    share of images where any perturbed copy flipped (Wilson 95% CI)
     flip_rate   share of (image, perturbation) pairs that flipped (bootstrap CI)
     flip_stain / flip_blur   the same, per perturbation type
-    mean_dp     mean |p(SSA) change|, which doesn't depend on the 0.5 threshold
+    mean_dp     mean |p(SSA) change|; doesn't depend on the 0.5 threshold, but the
+                sigmoid is steepest at 0.5, so it's still larger near the boundary
+    mean_dlogit mean |logit p(SSA) change|: how far the image moves along the
+                head's direction, independent of where it starts
     median_margin   median |p_orig - 0.5|: contested images sit nearer the
-                threshold, so they can flip from small shifts; read flip rates
-                next to mean_dp
+                threshold, so they can flip from small shifts; if mean_dlogit
+                barely rises with conflict, that, not instability, explains the flips
 plus a Spearman trend test of conflict vs flips per image.
 
 Rerun the same command to resume (predictions are appended per batch). Takes a
@@ -91,6 +94,11 @@ def boot_ci(values, seed):
     return tuple(np.percentile(means, [2.5, 97.5]))
 
 
+def _logit(p):
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p))
+
+
 def per_image(preds: pd.DataFrame) -> pd.DataFrame:
     """One row per image: original p, flips and |dp| per perturbation."""
     wide = preds.pivot(index="image", columns="variant", values="p_ssa")
@@ -99,6 +107,7 @@ def per_image(preds: pd.DataFrame) -> pd.DataFrame:
     perturbed = [c for c in wide.columns if c != "original"]
     flips = pd.DataFrame({v: (wide[v] >= 0.5) != (p0 >= 0.5) for v in perturbed})
     dp = pd.DataFrame({v: (wide[v] - p0).abs() for v in perturbed})
+    dlogit = pd.DataFrame({v: (_logit(wide[v]) - _logit(p0)).abs() for v in perturbed})
     out = meta.join(p0.rename("p_orig"))
     out["n_flips"] = flips.sum(axis=1)
     out["flip_any"] = flips.any(axis=1)
@@ -106,6 +115,7 @@ def per_image(preds: pd.DataFrame) -> pd.DataFrame:
     out["flip_blur"] = flips["blur"].astype(float)
     out["flip_rate"] = flips.mean(axis=1)
     out["mean_dp"] = dp.mean(axis=1)
+    out["mean_dlogit"] = dlogit.mean(axis=1)
     return out.reset_index()
 
 
@@ -116,7 +126,7 @@ def summarise(img: pd.DataFrame, seed: int) -> pd.DataFrame:
         n, k = len(g), int(g["flip_any"].sum())
         row = {"agreement": name, "n_images": n, "flip_any": k / n if n else np.nan}
         row["flip_any_lo"], row["flip_any_hi"] = wilson(k, n)
-        for col in ("flip_rate", "flip_stain", "flip_blur", "mean_dp"):
+        for col in ("flip_rate", "flip_stain", "flip_blur", "mean_dp", "mean_dlogit"):
             row[col] = g[col].mean() if n else np.nan
             row[f"{col}_lo"], row[f"{col}_hi"] = boot_ci(g[col], seed)
         row["median_margin"] = (g["p_orig"] - 0.5).abs().median() if n else np.nan
@@ -134,7 +144,9 @@ def md_table(df) -> str:
 def write_report(summary, img, out: Path, args):
     rho_f, p_f = spearmanr(img["conflict"], img["n_flips"])
     rho_d, p_d = spearmanr(img["conflict"], img["mean_dp"])
-    show = ["agreement", "n_images", "flip_any", "flip_rate", "flip_stain", "flip_blur", "mean_dp", "median_margin"]
+    rho_l, p_l = spearmanr(img["conflict"], img["mean_dlogit"])
+    show = ["agreement", "n_images", "flip_any", "flip_rate", "flip_stain", "flip_blur", "mean_dp", "mean_dlogit",
+            "median_margin"]
     lines = [
         "# Stain robustness (MUSK + soft head)",
         "",
@@ -146,10 +158,12 @@ def write_report(summary, img, out: Path, args):
         "",
         f"Trend, conflict (0 = 7/7 … 3 = 4/7) vs number of flips per image: Spearman {rho_f:.3f} (p = {p_f:.2g}).",
         f"Trend, conflict vs mean |change in p(SSA)|: Spearman {rho_d:.3f} (p = {p_d:.2g}).",
+        f"Trend, conflict vs mean |change in logit p(SSA)|: Spearman {rho_l:.3f} (p = {p_l:.2g}).",
         "",
         "Caveat: contested images have p(SSA) nearer 0.5 (see median_margin), so the same",
-        "shift is more likely to cross the threshold. mean_dp doesn't depend on the threshold:",
-        "if it's also higher for contested images, their embeddings themselves move more.",
+        "shift is more likely to cross the threshold, and mean_dp is inflated there too because",
+        "the sigmoid is steepest at 0.5. mean_dlogit removes both effects: how much it rises",
+        "with conflict is how much more the contested images' embeddings actually move.",
         "95% intervals are in summary.csv (Wilson for flip_any, bootstrap over images otherwise).",
     ]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
